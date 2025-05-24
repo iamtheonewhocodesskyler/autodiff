@@ -1,0 +1,1 @@
+It is a basic implementation of automatic differentiation (autodiff) in python using numpy. It supports numpy arrays, and can calculate higher order gradients as well. A lot of room for improvement currently.
