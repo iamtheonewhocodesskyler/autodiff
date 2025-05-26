@@ -1,6 +1,5 @@
 import numpy as np
 from enum import Enum
-from time import perf_counter  
 
 class Operator(Enum):
    PLUS = 0
@@ -74,6 +73,11 @@ class Variable:
    
    def __add__(self, other):
       other = Variable.variablify(other) 
+      if other.forward_mode and self.forward_mode and (other.wrt != self.wrt):
+         raise RuntimeError("Cannot have two forward at same time.")
+      
+      if other.forward_mode and not self.forward_mode:
+         return other.__radd__(self)
          
       new = Variable(other.value+self.value)
       new.parents = (self, other)
@@ -94,6 +98,11 @@ class Variable:
    
    def __sub__(self, other):
       other = Variable.variablify(other)
+      if other.forward_mode and self.forward_mode and (other.wrt != self.wrt):
+         raise RuntimeError("Cannot have two forward at same time.")
+      
+      if other.forward_mode and not self.forward_mode:
+         return other.__rsub__(self)
       new = Variable(self.value - other.value)
       new.parents = (self, other)
       new.operator = Operator.SUB
@@ -113,6 +122,11 @@ class Variable:
    def __mul__(self, other):
       other = Variable.variablify(other)
       new = Variable(self.value*other.value)
+      if other.forward_mode and self.forward_mode and (other.wrt != self.wrt):
+         raise RuntimeError("Cannot have two forward at same time.")
+      
+      if other.forward_mode and not self.forward_mode:
+         return other.__rmul__(self)
       new.parents = (self, other)
 
       new.operator = Operator.MUL
@@ -121,9 +135,11 @@ class Variable:
       # self.set_partner(other)
       if self.forward_mode:
          other_partial = self._other_partial(other)
+         # print(f"I am {self} and my partner's partial who is {other} his partial is {other_partial} and also his dual numbers are {other.dual_numbers}")
          new.wrt = self.wrt
          # new_partial = self.value*other_partial + other.value*self.dual_numbers[1]
          new_partial = get_partial_forward(self, other, self.dual_numbers[1], other_partial, Operator.MUL)
+         # print(f"The new partial is: {new_partial}")
          new.dual_numbers = (new.value, new_partial)
          new.forward_mode = True
 
@@ -131,6 +147,11 @@ class Variable:
    
    def __truediv__(self, other):
       other = Variable.variablify(other)
+      if other.forward_mode and self.forward_mode and (other.wrt != self.wrt):
+         raise RuntimeError("Cannot have two forward at same time.")
+      
+      if other.forward_mode and not self.forward_mode:
+         return other.__rtruediv__(self)
       new = Variable(self.value/other.value)
       new.parents = (self, other)
       new.operator=Operator.DIV
@@ -161,8 +182,10 @@ class Variable:
       if self.forward_mode:
          other_partial = self._other_partial(other)
          new.wrt = self.wrt
+         print(f"New is {new} and is wrt {new.wrt}")
          # new_partial = other_partial - self.dual_numbers[1]
          new_partial = get_partial_forward(other, self, other_partial, self.dual_numbers[1], Operator.SUB)
+         print(f"We got this {new_partial}")
          new.dual_numbers = (new.value, new_partial)
          new.forward_mode = True
 
@@ -193,6 +216,11 @@ class Variable:
    def __pow__(self, other):
       other = Variable.variablify(other)
       new = Variable(self.value**other.value)
+      if other.forward_mode and self.forward_mode and (other.wrt != self.wrt):
+         raise RuntimeError("Cannot have two forward at same time.")
+      
+      if other.forward_mode and not self.forward_mode:
+         return other.__rpow__(self)
       new.parents = (self, other)
       new.operator = Operator.POW
       # self.set_forward(new, other, Operator.POW)
@@ -315,6 +343,19 @@ class Variable:
       b.forward_mode = original_forward_B
       a._backward(a_chain) if a else ...
       b._backward(b_chain)
+
+   def set_forward(self, u: bool, wrt=None):
+      # print(f"Setting {self}'s forward which is {self.forward_mode} to {u}")
+      self.forward_mode = u
+      if u:
+         self.dual_numbers = (self.value, 1)
+         self.wrt = wrt if wrt else self
+         # print(f"Finished. Is now: {self.forward_mode} and with duals {self.dual_numbers} and wrt {self.wrt}")
+         return
+      self.dual_numbers = (None, None)
+      self.wrt = None
+      # print(f"Finished. Is now: {self.forward_mode} and with duals {self.dual_numbers} and wrt {self.wrt}")
+      return
    
 
    def in_graph(self, x):
@@ -333,10 +374,13 @@ class Variable:
          in_b = b.in_graph(x)
 
       return in_a or in_b
-      
+   
+   
+   
+
       
 def get_partial_forward(x: Variable, y: Variable, dx, dy, operator: Operator):
-   """x is right, y is left"""
+   """x is left, y is right"""
    # if x: x=x.value
    # y=y.value
    if x: 
@@ -346,12 +390,16 @@ def get_partial_forward(x: Variable, y: Variable, dx, dy, operator: Operator):
    original_y = y.forward_mode
    y.forward_mode = False
 
+
+
    if operator == Operator.PLUS:
       dz = dx+dy
    elif operator == Operator.SUB:
       dz = dx-dy
    elif operator == Operator.MUL:
-      dz = x*dy + y * dx
+      a = x*dy
+      b = y*dx
+      dz = (x*dy) + (y*dx)
    elif operator == Operator.DIV: # x/y
       dz = (y*dx - x*dy)/(y**2)
    elif operator == Operator.POW: # x^y
@@ -369,6 +417,7 @@ def get_partial_forward(x: Variable, y: Variable, dx, dy, operator: Operator):
    y.forward_mode = original_y
    
    return dz
+
 
    
 
@@ -459,7 +508,9 @@ def n_grads_rev(x: Variable, y: Variable, n, i=1): #Gives a list of gradients fr
    
    if grad.value == -0.0: grad.value = 0.0 #Fixing numerical error
    if not grad.in_graph(x):
-      return [grad]*(n+1)
+      zeroes = [Variable(0, is_constant=True)]*(n-i)
+      zeroes.insert(0, grad)
+      return zeroes
    if i==n:
       return [grad]
    
@@ -467,23 +518,64 @@ def n_grads_rev(x: Variable, y: Variable, n, i=1): #Gives a list of gradients fr
    n.insert(0, grad)
    return n
 
-# def n_grad(x: Variable, y: Variable, n):    TODO: Implement n_grad via forward mode
+   
+def forward_der(wrt: Variable, f, *args) -> Variable:
+
+   if wrt not in args:
+      raise ValueError("The variable to calculate derivative with not found in args.")
+   
+   for variable in args:
+      variable.set_forward(False)
+
+   wrt.set_forward(True)
+   u = f(*args)
+   return u
 
 
+# def n_grad(x: Variable, f, n, init_grad=None, *args): #TODO: Implement n_grad; same as n_grad_rev but for  forward mode for better performance
+#    init_grad = forward_der(x, f(x), *args).dual_numbers[1]
+
+
+
+def multi_forward(f, *args):
+   gradients = []
+   for variable in args:
+      gradients.append(forward_der(variable, f, *args))
+   return gradients
+
+def forward_gradients(f, *args):
+   arr = multi_forward(f, *args)
+   derivatives = []
+   for i in arr:
+      derivatives.append(i.dual_numbers[1])
+   return derivatives
+
+def pretty_print_variable_list(lis):
+   values = []
+   for i in lis:
+      if not isinstance(i, Variable):
+         raise TypeError("Pretty print specifically for Variable class.")
+      values.append(i.value)
+   return values
+   
 #Example case
 if __name__ == "__main__":
-   def f(x):
-      return sin(log(x**2 + 1)) + cos(x**3)*tan(2*x)
-   x = Variable(np.pi/2, forward_mode=False)
-   y = f(x)
-   y.backward()
-   # x.forward_mode=False
-   # y.forward_mode=True
+   def f(x,y):
+      return  sin(x*y) + log(x + y)
+   x = Variable(1)
+   y = Variable(2)
 
-   # print(y.dual_numbers[1])
-   print(x.grad)
-   # print([i.value for i in n_grads_rev(x, y, 10)])
+   #With forward
+   gradients = forward_gradients(f, x, y)
+   print(pretty_print_variable_list(gradients))
 
-   # i = perf_counter()
-   # y.backward()
-   # f = perf_counter()
+   #With reverse
+   z = f(x,y)
+   z.backward()
+
+   print(x.grad, y.grad)
+   
+
+
+   ### Output: [array(-0.49896034), array(-0.0828135)]
+   #-0.4989603397609507 -0.0828135032138087
